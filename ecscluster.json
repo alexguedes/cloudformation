@@ -1,0 +1,311 @@
+{
+    "AWSTemplateFormatVersion": "2010-09-09",
+    "Parameters": {
+        "DesiredCapacity": {
+            "Description": "Desired capacity of Auto Scaling group",
+            "Type": "Number"
+        },
+        "KeyName": {
+            "Description": "Name of existing key pair for SSH access",
+            "Type": "AWS::EC2::KeyPair::KeyName"
+        },
+        "MaxSize": {
+            "Description": "Maximum size of Auto Scaling group",
+            "Type": "Number"
+        },
+        "MinSize": {
+            "Description": "Minimum size of Auto Scaling group (at least one per AZ recommended)",
+            "Type": "Number"
+        },
+        "SubnetId": {
+            "Description": "Select the subnets to be used by the cluster",
+            "Type": "List<AWS::EC2::Subnet::Id>"
+        },
+        "VpcId": {
+            "Description": "VPC ID for ECS Cluster",
+            "Type": "AWS::EC2::VPC::Id"
+        }
+    },
+    "Resources": {
+        "ECSCluster": {
+            "Type": "AWS::ECS::Cluster"
+        },
+        "EcsAutoScalingGroup": {
+            "Properties": {
+                "DesiredCapacity": {
+                    "Ref": "DesiredCapacity"
+                },
+                "LaunchConfigurationName": {
+                    "Ref": "EcsAutoScalingLaunchConfig"
+                },
+                "MaxSize": {
+                    "Ref": "MaxSize"
+                },
+                "MinSize": {
+                    "Ref": "MinSize"
+                },
+                "VPCZoneIdentifier": {
+                    "Ref": "SubnetId"
+                }
+            },
+            "Type": "AWS::AutoScaling::AutoScalingGroup"
+        },
+        "EcsAutoScalingLaunchConfig": {
+            "Properties": {
+                "IamInstanceProfile": {
+                    "Ref": "EcsEc2InstanceProfile"
+                },
+                "ImageId": "ami-328a8056",
+                "InstanceType": "t2.micro",
+                "KeyName": {
+                    "Ref": "KeyName"
+                },
+                "SecurityGroups": [
+                    {
+                        "Ref": "EcsSecurityGroup"
+                    }
+                ],
+                "UserData": {
+                    "Fn::Base64": {
+                        "Fn::Join": [
+                            "",
+                            [
+                                "#cloud-config\n\n",
+                                "coreos:\n",
+                                " units:\n",
+                                "   - name: amazon-ecs-agent.service\n",
+                                "     command: start\n",
+                                "     runtime: true\n",
+                                "     content: |\n",
+                                "       [Unit]\n",
+                                "       Description=AWS ECS Agent\n",
+                                "       Documentation=https://docs.aws.amazon.com/AmazonECS/latest/developerguide/\n",
+                                "       Requires=docker.socket\n",
+                                "       After=docker.socket\n\n",
+                                "       [Service]\n",
+                                "       Environment=ECS_CLUSTER=",
+                                {
+                                    "Ref": "ECSCluster"
+                                },
+                                "\n",
+                                "       Environment=ECS_LOGLEVEL=info\n",
+                                "       Environment=ECS_VERSION=latest\n",
+                                "       Restart=on-failure\n",
+                                "       RestartSec=30\n",
+                                "       RestartPreventExitStatus=5\n",
+                                "       SyslogIdentifier=ecs-agent\n",
+                                "       ExecStartPre=-/bin/mkdir -p /var/log/ecs /var/ecs-data /etc/ecs\n",
+                                "       ExecStartPre=-/usr/bin/touch /etc/ecs/ecs.config\n",
+                                "       ExecStartPre=-/usr/bin/docker kill ecs-agent\n",
+                                "       ExecStartPre=-/usr/bin/docker rm ecs-agent\n",
+                                "       ExecStartPre=/usr/bin/docker pull amazon/amazon-ecs-agent:${ECS_VERSION}\n",
+                                "       ExecStart=/usr/bin/docker run --name ecs-agent ",
+                                "--env-file=/etc/ecs/ecs.config ",
+                                "--volume=/var/run/docker.sock:/var/run/docker.sock ",
+                                "--volume=/var/log/ecs:/log ",
+                                "--volume=/var/ecs-data:/data ",
+                                "--volume=/sys/fs/cgroup:/sys/fs/cgroup:ro ",
+                                "--volume=/run/docker/execdriver/native:/var/lib/docker/execdriver/native:ro ",
+                                "--publish=127.0.0.1:51678:51678 ",
+                                "--env=ECS_LOGFILE=/log/ecs-agent.log ",
+                                "--env=ECS_LOGLEVEL=info ",
+                                "--env=ECS_DATADIR=/data ",
+                                "--env=ECS_CLUSTER=${ECS_CLUSTER} ",
+                                "--env=ECS_AVAILABLE_LOGGING_DRIVERS=[\"json-file\",\"awslogs\"] ",
+                                "amazon/amazon-ecs-agent:latest\n\n",
+                                "   - name: docker-cleanup.service\n",
+                                "     content: |\n",
+                                "       [Unit]\n",
+                                "       Description=Docker images cleanup\n",
+                                "       [Service]\n",
+                                "       Type=oneshot\n",
+                                "       ExecStart=-/usr/bin/sh -c \"docker images -q | xargs --no-run-if-empty docker rmi\"\n\n",
+                                "   - name: docker-cleanup.timer\n",
+                                "     command: start\n",
+                                "     content: |\n",
+                                "       [Unit]\n",
+                                "       Description=Run Docker cleanup daily\n\n",
+                                "       [Timer]\n",
+                                "       OnCalendar=daily\n",
+                                "       Persistent=true\n"
+                            ]
+                        ]
+                    }
+                }
+            },
+            "Type": "AWS::AutoScaling::LaunchConfiguration"
+        },
+        "EcsEc2InstanceProfile": {
+            "Properties": {
+                "Path": "/",
+                "Roles": [
+                    {
+                        "Ref": "EcsEc2Role"
+                    }
+                ]
+            },
+            "Type": "AWS::IAM::InstanceProfile"
+        },
+        "EcsEc2Role": {
+            "Properties": {
+                "AssumeRolePolicyDocument": {
+                    "Statement": [
+                        {
+                            "Action": "sts:AssumeRole",
+                            "Effect": "Allow",
+                            "Principal": {
+                                "Service": [
+                                    "ec2.amazonaws.com"
+                                ]
+                            }
+                        }
+                    ]
+                },
+                "Path": "/",
+                "Policies": [
+                    {
+                        "PolicyDocument": {
+                            "Statement": [
+                                {
+                                    "Action": [
+                                        "ecs:CreateCluster",
+                                        "ecs:DeregisterContainerInstance",
+                                        "ecs:DiscoverPollEndpoint",
+                                        "ecs:Poll",
+                                        "ecs:RegisterContainerInstance",
+                                        "ecs:StartTelemetrySession",
+                                        "ecs:Submit*",
+                                        "logs:CreateLogStream",
+                                        "logs:PutLogEvents"
+                                    ],
+                                    "Effect": "Allow",
+                                    "Resource": "*"
+                                }
+                            ]
+                        },
+                        "PolicyName": "EcsPolicy"
+                    }
+                ]
+            },
+            "Type": "AWS::IAM::Role"
+        },
+        "EcsLoadBalancer": {
+            "Properties": {
+                "LoadBalancerAttributes": [
+                    {
+                        "Key": "idle_timeout.timeout_seconds",
+                        "Value": "30"
+                    }
+                ],
+                "Name": "EcsLoadBalancer",
+                "Scheme": "internet-facing",
+                "SecurityGroups": [
+                    {
+                        "Ref": "ElbSecurityGroup"
+                    }
+                ],
+                "Subnets": {
+                    "Ref": "SubnetId"
+                }
+            },
+            "Type": "AWS::ElasticLoadBalancingV2::LoadBalancer"
+        },
+        "EcsLoadBalancerListener": {
+            "Properties": {
+                "DefaultActions": [
+                    {
+                        "TargetGroupArn": {
+                            "Ref": "EcsLoadBalancerTargetGroup"
+                        },
+                        "Type": "forward"
+                    }
+                ],
+                "LoadBalancerArn": {
+                    "Ref": "EcsLoadBalancer"
+                },
+                "Port": 80,
+                "Protocol": "HTTP"
+            },
+            "Type": "AWS::ElasticLoadBalancingV2::Listener"
+        },
+        "EcsLoadBalancerTargetGroup": {
+            "DependsOn": "EcsLoadBalancer",
+            "Properties": {
+                "HealthCheckIntervalSeconds": 10,
+                "HealthCheckPath": "/",
+                "HealthCheckProtocol": "HTTP",
+                "HealthCheckTimeoutSeconds": 5,
+                "HealthyThresholdCount": 2,
+                "Name": "EcsLoadBalancerTargetGroup",
+                "Port": 80,
+                "Protocol": "HTTP",
+                "UnhealthyThresholdCount": 2,
+                "VpcId": {
+                    "Ref": "VpcId"
+                }
+            },
+            "Type": "AWS::ElasticLoadBalancingV2::TargetGroup"
+        },
+        "EcsLogGroup": {
+            "Properties": {
+                "LogGroupName": {
+                    "Fn::Join": [
+                        "",
+                        [
+                            "EcsLogGroup-",
+                            {
+                                "Ref": "AWS::StackName"
+                            }
+                        ]
+                    ]
+                },
+                "RetentionInDays": 14
+            },
+            "Type": "AWS::Logs::LogGroup"
+        },
+        "EcsSecurityGroup": {
+            "Properties": {
+                "GroupDescription": "ECS Security Group",
+                "VpcId": {
+                    "Ref": "VpcId"
+                }
+            },
+            "Type": "AWS::EC2::SecurityGroup"
+        },
+        "EcsSecurityGroupInboundElb": {
+            "Properties": {
+                "FromPort": 80,
+                "GroupId": {
+                    "Ref": "EcsSecurityGroup"
+                },
+                "IpProtocol": "tcp",
+                "SourceSecurityGroupId": {
+                    "Ref": "ElbSecurityGroup"
+                },
+                "ToPort": 80
+            },
+            "Type": "AWS::EC2::SecurityGroupIngress"
+        },
+        "ElbSecurityGroup": {
+            "Properties": {
+                "GroupDescription": "ELB Security Group",
+                "VpcId": {
+                    "Ref": "VpcId"
+                }
+            },
+            "Type": "AWS::EC2::SecurityGroup"
+        },
+        "ElbSecurityGroupInbound80": {
+            "Properties": {
+                "CidrIp": "0.0.0.0/0",
+                "FromPort": 80,
+                "GroupId": {
+                    "Ref": "ElbSecurityGroup"
+                },
+                "IpProtocol": "tcp",
+                "ToPort": 80
+            },
+            "Type": "AWS::EC2::SecurityGroupIngress"
+        }
+    }
+}
